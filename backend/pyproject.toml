@@ -1,0 +1,7 @@
+[project]
+name = "marketsentience"
+version = "0.1.0"
+description = "market sentiment analysis website"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = []
