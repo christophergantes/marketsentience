@@ -1,65 +1,69 @@
 import torch
 from torch.utils.data import DataLoader
-import mlflow
-import torchmetrics
-
-accuracy_metric = torchmetrics.Accuracy(task="multiclass", num_classes=3)
-precision_metric = torchmetrics.Precision(task="multiclass", num_classes=3)
 
 
 def train_step(
     model: torch.nn.Module,
     train_dataloader: DataLoader,
     optimizer: torch.optim.Optimizer,
+    accuracy_metric,
+    precision_metric,
     device: torch.device,
 ):
-    model.to(device)
-    accuracy_metric.to(device)
-    precision_metric.to(device)
-
-    train_loss = []
+    accuracy_metric.reset()
+    precision_metric.reset()
+    running_loss = 0.0
     model.train()
-    for batch in train_dataloader:
+    for step, batch in enumerate(train_dataloader):
         batch = {k: v.to(device) for k, v in batch.items()}
         output = model(**batch)
-        predictions = torch.argmax(output.logits, dim=1)
+        preds = torch.argmax(output.logits, dim=1)
         loss = output.loss
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
 
-        accuracy_metric(preds=predictions, target=batch["labels"])
-        precision_metric(preds=predictions, target=batch["labels"])
-        train_loss.append(loss.item())
+        accuracy_metric(preds=preds, target=batch["labels"])
+        precision_metric(preds=preds, target=batch["labels"])
+        running_loss += output.loss.item()
+    train_accuracy = accuracy_metric.compute().item()
+    train_precision = precision_metric.compute().item()
+    avg_loss = running_loss / len(train_dataloader)
+    return {
+        "train_accuracy": train_accuracy,
+        "train_precision": train_precision,
+        "train_loss": avg_loss,
+    }
 
-    accuracy = accuracy_metric.compute().item()
-    precision = precision_metric.compute().item()
-    return {"accuracy": accuracy, "precision": precision, "loss": train_loss}
 
-
-def eval_step(
-    model: torch.nn.Module, eval_dataloader: DataLoader, device: torch.device
+def val_step(
+    model: torch.nn.Module,
+    eval_dataloader: DataLoader,
+    accuracy_metric,
+    precision_metric,
+    device: torch.device,
 ):
-    model.to(device)
-    accuracy_metric.to(device)
-    precision_metric.to(device)
-
+    accuracy_metric.reset()
+    precision_metric.reset()
+    running_loss = 0.0
     model.eval()
-    eval_loss = []
     with torch.inference_mode():
         for step, batch in enumerate(eval_dataloader):
             batch = {k: v.to(device) for k, v in batch.items()}
             output = model(**batch)
-            predictions = torch.argmax(output.logits, dim=1)
+            preds = torch.argmax(output.logits, dim=1)
 
-            accuracy_metric(preds=predictions, target=batch["labels"])
-            precision_metric(preds=predictions, target=batch["labels"])
-            eval_loss.append(output.loss.item())
-            mlflow.log_metric("eval_loss", output.loss.item(), step=step)
-    accuracy = accuracy_metric.compute().item()
-    precision = accuracy_metric.compute().item()
-
-    return {"accuracy": accuracy, "precision": precision, "loss": eval_loss}
+            accuracy_metric(preds=preds, target=batch["labels"])
+            precision_metric(preds=preds, target=batch["labels"])
+            running_loss += output.loss.item()
+        val_accuracy = accuracy_metric.compute().item()
+        val_precision = precision_metric.compute().item()
+        avg_loss = running_loss / len(eval_dataloader)
+    return {
+        "val_accuracy": val_accuracy,
+        "val_precision": val_precision,
+        "val_loss": avg_loss,
+    }
 
 
 def test_step(

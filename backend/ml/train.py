@@ -1,24 +1,25 @@
 def main():
     import torch
     import mlflow
-    import mlflow.transformers
     import torchmetrics
-    from torch.utils.data import DataLoader
     from transformers import (
         AutoModelForSequenceClassification,
         AutoTokenizer,
         DataCollatorWithPadding,
     )
     from datasets import load_dataset
-    from data_setup import adjust_labels
+    from engine import train_step, val_step
+    from data_setup import adjust_labels, tokenize_dataset, create_dataloaders
     from utils import set_seeds, set_device
     from tqdm.auto import tqdm
-    import os
 
-    NUM_EPOCHS = 3
-    LR = 0.00005
+    NUM_EPOCHS = 10
     BATCH_SIZE = 32
+    LR = 0.000001
     SEED = 42
+
+    checkpoint = "ProsusAI/finbert"
+    dataset_name = "zeroshot/twitter-financial-news-sentiment"
 
     device = set_device()
     print(f"[INFO] Torch device set to '{device}'")
@@ -26,99 +27,67 @@ def main():
     set_seeds(SEED)
     print(f"[INFO] Seeds set to {SEED}")
 
-    checkpoint = "ProsusAI/finbert"
-    dataset_name = "zeroshot/twitter-financial-news-sentiment"
-
     print(f"[INFO] Loading dataset '{dataset_name}'")
     raw_dataset = load_dataset(path=dataset_name)
     raw_dataset = raw_dataset.map(adjust_labels)
 
-    def tokenize_function(sample):
-        tokenizer = AutoTokenizer.from_pretrained(checkpoint)
-        return tokenizer(sample["text"], truncation=True)
-
     print("[INFO] Tokenizing dataset")
-    tokenized_dataset = raw_dataset.map(tokenize_function, batched=True)
+    tokenized_dataset = tokenize_dataset(raw_dataset, checkpoint)
     tokenized_dataset = tokenized_dataset.remove_columns(["text"])
     tokenized_dataset = tokenized_dataset.rename_column("label", "labels")
     tokenized_dataset.set_format("torch")
 
+    print("[INFO] Creating dataloaders")
     tokenizer = AutoTokenizer.from_pretrained(checkpoint)
     data_collator = DataCollatorWithPadding(tokenizer)
-
-    print("[INFO] Creating dataloaders")
-    train_dataloader = DataLoader(
+    train_dataloader, val_dataloader = create_dataloaders(
         tokenized_dataset["train"],
-        batch_size=BATCH_SIZE,
-        shuffle=True,
+        tokenized_dataset["validation"],
+        BATCH_SIZE,
         collate_fn=data_collator,
     )
-    eval_dataloader = DataLoader(
-        tokenized_dataset["validation"], batch_size=BATCH_SIZE, collate_fn=data_collator
-    )
 
-    print(f"[INFO] Loading '{checkpoint}' model ")
+    print(f"[INFO] Loading '{checkpoint}' model")
     model = AutoModelForSequenceClassification.from_pretrained(checkpoint).to(device)
+    model_name = checkpoint.split("/")[-1]
     optimizer = torch.optim.Adam(params=model.parameters(), lr=LR)
 
-    accuracy_metric = torchmetrics.Accuracy(task="multiclass", num_classes=3).to(device)
-    precision_metric = torchmetrics.Accuracy(task="multiclass", num_classes=3).to(
-        device
-    )
-
-    mlflow.set_tracking_uri('http://localhost:5000')
+    mlflow.set_experiment("Training_runs")
+    mlflow.set_tracking_uri("http://localhost:8080")
     with mlflow.start_run():
         params = {
+            "MODEL": model_name,
             "LEARNING_RATE": LR,
             "BATCH_SIZE": BATCH_SIZE,
             "EPOCHS": NUM_EPOCHS,
             "SEED": SEED,
         }
         mlflow.log_params(params)
+
+        accuracy_metric = torchmetrics.Accuracy(task="multiclass", num_classes=3).to(
+            device
+        )
+        precision_metric = torchmetrics.Precision(task="multiclass", num_classes=3).to(
+            device
+        )
+
         for epoch in tqdm(range(NUM_EPOCHS)):
-            accuracy_metric.reset()
-            precision_metric.reset()
-            model.train()
-            for step, batch in enumerate(train_dataloader):
-                batch = {k: v.to(device) for k, v in batch.items()}
-                output = model(**batch)
-                preds = torch.argmax(output.logits, dim=1)
-                loss = output.loss
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
+            train_results = train_step(
+                model,
+                train_dataloader,
+                optimizer,
+                accuracy_metric,
+                precision_metric,
+                device,
+            )
+            val_results = val_step(
+                model, val_dataloader, accuracy_metric, precision_metric, device
+            )
 
-                accuracy_metric(preds=preds, target=batch["labels"])
-                precision_metric(preds=preds, target=batch["labels"])
-                mlflow.log_metric(
-                    "train_loss_per_batch",
-                    loss.item(),
-                    step=epoch * len(train_dataloader) + step,
-                )
-
-            train_accuracy = accuracy_metric.compute().item()
-            train_precision = precision_metric.compute().item()
-            mlflow.log_metric("train_accuracy", train_accuracy, step=epoch)
-            mlflow.log_metric("train_precision", train_precision, step=epoch)
-
-            accuracy_metric.reset()
-            precision_metric.reset()
-            model.eval()
-            with torch.inference_mode():
-                for step, batch in enumerate(eval_dataloader):
-                    batch = {k: v.to(device) for k, v in batch.items()}
-                    output = model(**batch)
-                    preds = torch.argmax(output.logits, dim=1)
-
-                    accuracy_metric(preds=preds, target=batch["labels"])
-                    precision_metric(preds=preds, target=batch["labels"])
-
-                val_accuracy = accuracy_metric.compute().item()
-                val_precision = precision_metric.compute().item()
-                mlflow.log_metric("val_accuracy", val_accuracy, step=epoch)
-                mlflow.log_metric("val_precision", val_precision, step=epoch)
-        model.save_pretrained(f"./models/finbert")
-        tokenizer.save_pretrained(f"./models/finbert")
+            mlflow.log_metrics(train_results, step=epoch)
+            mlflow.log_metrics(val_results, step=epoch)
+            model_save_name = f"{model_name}_batch_{BATCH_SIZE}_lr_{LR}_epoch_{epoch}"
+            model.save_pretrained(f"./backend/ml/models/{model_save_name}")
 
 
 if __name__ == "__main__":
