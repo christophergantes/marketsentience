@@ -1,7 +1,7 @@
-from fastapi import APIRouter, Query
-from ml.finbert import model, tokenizer
-from app.services.polygon_client import get_latest_news
 import torch
+from services.finbert import model, tokenizer
+from services.massive_client import get_latest_news
+from fastapi import APIRouter, Query
 
 router = APIRouter()
 
