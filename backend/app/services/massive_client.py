@@ -1,6 +1,5 @@
 from dotenv import load_dotenv
 from massive import RESTClient
-from massive.exceptions import BadResponse
 
 from core.config import settings
 
@@ -15,12 +14,17 @@ client = RESTClient(api_key=MASSIVE_API_KEY, pagination=False)
 
 
 def get_latest_news(ticker: str | None = None, limit: int = 1):
-    try:
-        return [
-            n
-            for n in client.list_ticker_news(
-                ticker=ticker, order="desc", limit=limit, sort="published_utc"
+        try:
+            response = client.list_ticker_news(
+                ticker=ticker,
+                order="desc",
+                limit=limit,
+                sort="published_utc",
             )
-        ]
-    except BadResponse:
-        return []
+            print(response)
+            news = [n for n in response]
+            print(f"Fetched {len(news)} articles for {ticker}")
+            return news
+        except Exception:
+            print(f"Failed to fetch news for {ticker}")
+            return []
